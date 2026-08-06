@@ -1,6 +1,6 @@
 #include "../runtime_api.hpp"
 
-#include <cuda_runtime.h>
+#include "cuda_compat.hpp"
 #include <cstring>
 
 namespace llaisys::device::nvidia {

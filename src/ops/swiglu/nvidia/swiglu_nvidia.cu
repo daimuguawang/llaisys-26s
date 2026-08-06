@@ -2,11 +2,63 @@
 
 #include "../../../core/llaisys_core.hpp"
 #include "../../../utils.hpp"
-
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
+#include "../../../device/nvidia/cuda_compat.hpp"
 
 namespace llaisys::ops::nvidia {
+
+#ifdef USE_MXMACA
+// MXMACA implementation: host-side computation with device memory copy
+
+template <typename T>
+void swiglu_host_impl(T *out, const T *gate, const T *up, size_t numel) {
+    for (size_t i = 0; i < numel; i++) {
+        float g = static_cast<float>(gate[i]);
+        float u = static_cast<float>(up[i]);
+        float sigmoid_g = 1.0f / (1.0f + std::exp(-g));
+        float result = u * g * sigmoid_g;
+        if constexpr (std::is_same_v<T, half> || std::is_same_v<T, __nv_bfloat16>) {
+            out[i] = static_cast<T>(result);
+        } else {
+            out[i] = result;
+        }
+    }
+}
+
+void swiglu(std::byte *out, const std::byte *gate, const std::byte *up,
+            llaisysDataType_t type, size_t numel) {
+    cudaDeviceSynchronize();
+
+    switch (type) {
+    case LLAISYS_DTYPE_F32: {
+        auto h_gate = mxm_copy_to_host(reinterpret_cast<const float *>(gate), numel);
+        auto h_up = mxm_copy_to_host(reinterpret_cast<const float *>(up), numel);
+        std::vector<float> h_out(numel);
+        swiglu_host_impl(h_out.data(), h_gate.data(), h_up.data(), numel);
+        mxm_copy_to_device(reinterpret_cast<float *>(out), h_out.data(), numel);
+        break;
+    }
+    case LLAISYS_DTYPE_F16: {
+        auto h_gate = mxm_copy_to_host(reinterpret_cast<const half *>(gate), numel);
+        auto h_up = mxm_copy_to_host(reinterpret_cast<const half *>(up), numel);
+        std::vector<half> h_out(numel);
+        swiglu_host_impl(h_out.data(), h_gate.data(), h_up.data(), numel);
+        mxm_copy_to_device(reinterpret_cast<half *>(out), h_out.data(), numel);
+        break;
+    }
+    case LLAISYS_DTYPE_BF16: {
+        auto h_gate = mxm_copy_to_host(reinterpret_cast<const __nv_bfloat16 *>(gate), numel);
+        auto h_up = mxm_copy_to_host(reinterpret_cast<const __nv_bfloat16 *>(up), numel);
+        std::vector<__nv_bfloat16> h_out(numel);
+        swiglu_host_impl(h_out.data(), h_gate.data(), h_up.data(), numel);
+        mxm_copy_to_device(reinterpret_cast<__nv_bfloat16 *>(out), h_out.data(), numel);
+        break;
+    }
+    default:
+        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+    }
+}
+
+#else  // NVIDIA CUDA
 
 template <typename T>
 __device__ __forceinline__ float dev_to_float(T v) {
@@ -71,5 +123,7 @@ void swiglu(std::byte *out, const std::byte *gate, const std::byte *up, llaisysD
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
+
+#endif  // USE_MXMACA
 
 } // namespace llaisys::ops::nvidia

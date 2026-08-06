@@ -88,3 +88,8 @@ htmlcov/
 Thumbs.db
 ehthumbs.db
 desktop.ini
+
+# SSH 算力容器配置（含访问凭证，勿提交）
+scripts/ssh_compute.sh
+scripts/ssh_compute_c500.sh
+*.ssh_config

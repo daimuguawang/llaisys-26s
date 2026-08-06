@@ -2,12 +2,85 @@
 
 #include "../../../core/llaisys_core.hpp"
 #include "../../../utils.hpp"
+#include "../../../device/nvidia/cuda_compat.hpp"
 
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
 #include <cfloat>
 
 namespace llaisys::ops::nvidia {
+
+#ifdef USE_MXMACA
+// MXMACA implementation: host-side computation with device memory copy
+
+template <typename T>
+float to_float(T v) {
+    if constexpr (std::is_same_v<T, half>) {
+        return static_cast<float>(v);
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+        return static_cast<float>(v);
+    } else {
+        return v;
+    }
+}
+
+void argmax(int64_t *max_idx, std::byte *max_val, const std::byte *vals,
+            llaisysDataType_t type, size_t numel) {
+    cudaDeviceSynchronize();
+
+    switch (type) {
+    case LLAISYS_DTYPE_F32: {
+        auto h_vals = mxm_copy_to_host(reinterpret_cast<const float *>(vals), numel);
+        float local_max = -FLT_MAX;
+        int64_t local_idx = 0;
+        for (size_t i = 0; i < numel; i++) {
+            float v = h_vals[i];
+            if (v > local_max) {
+                local_max = v;
+                local_idx = static_cast<int64_t>(i);
+            }
+        }
+        mxm_copy_to_device(max_idx, &local_idx, 1);
+        float result = local_max;
+        mxm_copy_to_device(reinterpret_cast<float *>(max_val), &result, 1);
+        break;
+    }
+    case LLAISYS_DTYPE_F16: {
+        auto h_vals = mxm_copy_to_host(reinterpret_cast<const half *>(vals), numel);
+        float local_max = -FLT_MAX;
+        int64_t local_idx = 0;
+        for (size_t i = 0; i < numel; i++) {
+            float v = to_float(h_vals[i]);
+            if (v > local_max) {
+                local_max = v;
+                local_idx = static_cast<int64_t>(i);
+            }
+        }
+        mxm_copy_to_device(max_idx, &local_idx, 1);
+        half result = static_cast<half>(local_max);
+        mxm_copy_to_device(reinterpret_cast<half *>(max_val), &result, 1);
+        break;
+    }
+    case LLAISYS_DTYPE_BF16: {
+        auto h_vals = mxm_copy_to_host(reinterpret_cast<const __nv_bfloat16 *>(vals), numel);
+        float local_max = -FLT_MAX;
+        int64_t local_idx = 0;
+        for (size_t i = 0; i < numel; i++) {
+            float v = to_float(h_vals[i]);
+            if (v > local_max) {
+                local_max = v;
+                local_idx = static_cast<int64_t>(i);
+            }
+        }
+        mxm_copy_to_device(max_idx, &local_idx, 1);
+        __nv_bfloat16 result = static_cast<__nv_bfloat16>(local_max);
+        mxm_copy_to_device(reinterpret_cast<__nv_bfloat16 *>(max_val), &result, 1);
+        break;
+    }
+    default:
+        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+    }
+}
+
+#else  // NVIDIA CUDA
 
 template <typename T>
 __device__ __forceinline__ float dev_to_float(T v) {
@@ -105,5 +178,7 @@ void argmax(int64_t *max_idx, std::byte *max_val, const std::byte *vals,
     // Result is read back synchronously by the host.
     llaisys::core::context().runtime().synchronize();
 }
+
+#endif  // USE_MXMACA
 
 } // namespace llaisys::ops::nvidia

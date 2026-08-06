@@ -1,6 +1,6 @@
 #include "nvidia_resource.cuh"
 
-#include <cuda_runtime.h>
+#include "cuda_compat.hpp"
 
 namespace llaisys::device::nvidia {
 

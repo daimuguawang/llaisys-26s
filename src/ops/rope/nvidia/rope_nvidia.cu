@@ -2,11 +2,83 @@
 
 #include "../../../core/llaisys_core.hpp"
 #include "../../../utils.hpp"
+#include "../../../device/nvidia/cuda_compat.hpp"
 
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
+#include <cmath>
 
 namespace llaisys::ops::nvidia {
+
+#ifdef USE_MXMACA
+// MXMACA implementation: host-side computation with device memory copy
+
+template <typename T>
+void rope_host_impl(T *out, const T *in, const int64_t *pos_ids,
+                    float theta, size_t seq_len, size_t n_heads, size_t head_dim) {
+    size_t half_dim = head_dim / 2;
+    for (size_t s = 0; s < seq_len; s++) {
+        int64_t pos = pos_ids[s];
+        for (size_t h = 0; h < n_heads; h++) {
+            const T *x = in + (s * n_heads + h) * head_dim;
+            T *y = out + (s * n_heads + h) * head_dim;
+            for (size_t j = 0; j < half_dim; j++) {
+                float exponent = static_cast<float>(2 * j) / static_cast<float>(head_dim);
+                float freqs = static_cast<float>(pos) / std::pow(theta, exponent);
+                float cos_val = std::cos(freqs);
+                float sin_val = std::sin(freqs);
+
+                float a = static_cast<float>(x[j]);
+                float b = static_cast<float>(x[j + half_dim]);
+
+                if constexpr (std::is_same_v<T, half> || std::is_same_v<T, __nv_bfloat16>) {
+                    y[j] = static_cast<T>(a * cos_val - b * sin_val);
+                    y[j + half_dim] = static_cast<T>(b * cos_val + a * sin_val);
+                } else {
+                    y[j] = a * cos_val - b * sin_val;
+                    y[j + half_dim] = b * cos_val + a * sin_val;
+                }
+            }
+        }
+    }
+}
+
+void rope(std::byte *out, const std::byte *in, const int64_t *pos_ids,
+          llaisysDataType_t type, float theta, size_t seq_len, size_t n_heads, size_t head_dim) {
+    cudaDeviceSynchronize();
+
+    size_t numel = seq_len * n_heads * head_dim;
+    size_t num_pos = seq_len;
+
+    switch (type) {
+    case LLAISYS_DTYPE_F32: {
+        auto h_in = mxm_copy_to_host(reinterpret_cast<const float *>(in), numel);
+        auto h_pos_ids = mxm_copy_to_host(pos_ids, num_pos);
+        std::vector<float> h_out(numel);
+        rope_host_impl(h_out.data(), h_in.data(), h_pos_ids.data(), theta, seq_len, n_heads, head_dim);
+        mxm_copy_to_device(reinterpret_cast<float *>(out), h_out.data(), numel);
+        break;
+    }
+    case LLAISYS_DTYPE_F16: {
+        auto h_in = mxm_copy_to_host(reinterpret_cast<const half *>(in), numel);
+        auto h_pos_ids = mxm_copy_to_host(pos_ids, num_pos);
+        std::vector<half> h_out(numel);
+        rope_host_impl(h_out.data(), h_in.data(), h_pos_ids.data(), theta, seq_len, n_heads, head_dim);
+        mxm_copy_to_device(reinterpret_cast<half *>(out), h_out.data(), numel);
+        break;
+    }
+    case LLAISYS_DTYPE_BF16: {
+        auto h_in = mxm_copy_to_host(reinterpret_cast<const __nv_bfloat16 *>(in), numel);
+        auto h_pos_ids = mxm_copy_to_host(pos_ids, num_pos);
+        std::vector<__nv_bfloat16> h_out(numel);
+        rope_host_impl(h_out.data(), h_in.data(), h_pos_ids.data(), theta, seq_len, n_heads, head_dim);
+        mxm_copy_to_device(reinterpret_cast<__nv_bfloat16 *>(out), h_out.data(), numel);
+        break;
+    }
+    default:
+        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+    }
+}
+
+#else  // NVIDIA CUDA
 
 template <typename T>
 __device__ __forceinline__ float dev_to_float(T v) {
@@ -92,5 +164,7 @@ void rope(std::byte *out, const std::byte *in, const int64_t *pos_ids,
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
+
+#endif  // USE_MXMACA
 
 } // namespace llaisys::ops::nvidia

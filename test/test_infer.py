@@ -23,10 +23,12 @@ def load_hf_model(model_path=None, device_name="cpu"):
         print(f"Loading model from Hugging Face: {model_id}")
         model_path = snapshot_download(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    # Always load PyTorch model on CPU for MXMACA compatibility
+    torch_device_name = "cpu" if device_name == "nvidia" else device_name
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map=torch_device(device_name),
+        device_map=torch_device(torch_device_name),
         trust_remote_code=True,
     )
 
@@ -89,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_k", default=50, type=int)
     parser.add_argument("--temperature", default=1.0, type=float)
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--skip-hf", action="store_true", help="Skip HuggingFace reference inference")
 
     args = parser.parse_args()
 
@@ -96,38 +99,42 @@ if __name__ == "__main__":
     if args.test:
         top_p, top_k, temperature = 1.0, 1, 1.0
 
-    tokenizer, model, model_path = load_hf_model(args.model, args.device)
+    # Load tokenizer and model path
+    tokenizer, hf_model, model_path = load_hf_model(args.model, args.device)
 
-    # Example prompt
-    start_time = time.time()
-    tokens, output = hf_infer(
-        args.prompt,
-        tokenizer,
-        model,
-        max_new_tokens=args.max_steps,
-        top_p=top_p,
-        top_k=top_k,
-        temperature=temperature,
-    )
-    end_time = time.time()
+    tokens = None
+    if not args.skip_hf:
+        # HuggingFace reference inference
+        start_time = time.time()
+        tokens, output = hf_infer(
+            args.prompt,
+            tokenizer,
+            hf_model,
+            max_new_tokens=args.max_steps,
+            top_p=top_p,
+            top_k=top_k,
+            temperature=temperature,
+        )
+        end_time = time.time()
 
-    del model
-    gc.collect()
+        del hf_model
+        gc.collect()
 
-    print("\n=== Answer ===\n")
-    print("Tokens:")
-    print(tokens)
-    print("\nContents:")
-    print(output)
-    print("\n")
-    print(f"Time elapsed: {(end_time - start_time):.2f}s\n")
+        print("\n=== Answer (HuggingFace) ===\n")
+        print("Tokens:")
+        print(tokens)
+        print("\nContents:")
+        print(output)
+        print("\n")
+        print(f"Time elapsed: {(end_time - start_time):.2f}s\n")
 
-    model = load_llaisys_model(model_path, args.device)
+    # LLAISYS inference
+    llaisys_model = load_llaisys_model(model_path, args.device)
     start_time = time.time()
     llaisys_tokens, llaisys_output = llaisys_infer(
         args.prompt,
         tokenizer,
-        model,
+        llaisys_model,
         max_new_tokens=args.max_steps,
         top_p=top_p,
         top_k=top_k,
@@ -136,7 +143,7 @@ if __name__ == "__main__":
 
     end_time = time.time()
 
-    print("\n=== Your Result ===\n")
+    print("\n=== Your Result (LLAISYS) ===\n")
     print("Tokens:")
     print(llaisys_tokens)
     print("\nContents:")
@@ -144,6 +151,8 @@ if __name__ == "__main__":
     print("\n")
     print(f"Time elapsed: {(end_time - start_time):.2f}s\n")
 
-    if args.test:
-        assert llaisys_tokens == tokens
+    if args.test and tokens is not None:
+        assert llaisys_tokens == tokens, f"Token mismatch!\nExpected: {tokens}\nGot: {llaisys_tokens}"
         print("\033[92mTest passed!\033[0m\n")
+    elif args.test:
+        print("\033[93mSkipped token comparison (--skip-hf used)\033[0m\n")

@@ -4,25 +4,26 @@ from ..libllaisys import DeviceType, DataType
 from ..libllaisys import LlaisysQwen2Meta, LlaisysQwen2Weights
 from ..tensor import Tensor
 from pathlib import Path
-import safetensors
+import safetensors.torch
 import numpy as np
+import torch
 import ctypes
 import json
 import os
 
-def _dtype_from_numpy(np_dtype):
-    if np_dtype == np.float32:
+def _dtype_from_torch(torch_dtype):
+    if torch_dtype == torch.float32:
         return DataType.F32
-    elif np_dtype == np.float16:
+    elif torch_dtype == torch.float16:
         return DataType.F16
-    elif np_dtype == np.bfloat16:
+    elif torch_dtype == torch.bfloat16:
         return DataType.BF16
-    elif np_dtype == np.int64:
+    elif torch_dtype == torch.int64:
         return DataType.I64
-    elif np_dtype == np.int32:
+    elif torch_dtype == torch.int32:
         return DataType.I32
     else:
-        raise ValueError(f"Unsupported dtype: {np_dtype}")
+        raise ValueError(f"Unsupported torch dtype: {torch_dtype}")
 
 class Qwen2:
     def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
@@ -35,11 +36,11 @@ class Qwen2:
         st_files = sorted(model_path.glob("*.safetensors"))
         if not st_files:
             raise FileNotFoundError(f"No safetensors files found in {model_path}")
-        # Detect dtype
-        with safetensors.safe_open(st_files[0], framework="numpy", device="cpu") as f:
-            first_key = list(f.keys())[0]
-            first_tensor = f.get_tensor(first_key)
-            dtype = _dtype_from_numpy(first_tensor.dtype)
+        # Detect dtype using torch
+        state_dict = safetensors.torch.load_file(str(st_files[0]))
+        first_key = list(state_dict.keys())[0]
+        first_tensor = state_dict[first_key]
+        dtype = _dtype_from_torch(first_tensor.dtype)
         # Build meta
         hidden_size = config["hidden_size"]
         num_layers = config["num_hidden_layers"]
@@ -105,33 +106,39 @@ class Qwen2:
             weight_map[prefix + "mlp.gate_proj.weight"] = ("mlp_gate_w", i)
             weight_map[prefix + "mlp.up_proj.weight"] = ("mlp_up_w", i)
             weight_map[prefix + "mlp.down_proj.weight"] = ("mlp_down_w", i)
-        # Process all files
+        # Process all files using torch
         for file in st_files:
-            with safetensors.safe_open(file, framework="numpy", device="cpu") as f:
-                for name in f.keys():
-                    if name not in weight_map:
-                        # Skip unknown weights
-                        continue
-                    field_name, layer_idx = weight_map[name]
-                    data = f.get_tensor(name)
-                    # Create tensor and load data
-                    t = Tensor(shape=tuple(data.shape), dtype=dtype, device=device)
-                    # Make sure data is contiguous
-                    data = np.ascontiguousarray(data)
-                    ptr = data.ctypes.data_as(ctypes.c_void_p)
-                    t.load(ptr)
-                    # Assign to weights struct
-                    if layer_idx is None:
-                        # Global weight
-                        setattr(self._weights, field_name, t.lib_tensor())
-                    else:
-                        # Array element
-                        arr = getattr(self._weights, field_name)
-                        arr[layer_idx] = t.lib_tensor()
-                    # Keep a reference to avoid GC
-                    if not hasattr(self, "_weight_tensors"):
-                        self._weight_tensors = []
-                    self._weight_tensors.append(t)
+            state_dict = safetensors.torch.load_file(str(file))
+            for name, tensor_data in state_dict.items():
+                if name not in weight_map:
+                    # Skip unknown weights
+                    continue
+                field_name, layer_idx = weight_map[name]
+                # Create tensor and load data
+                t = Tensor(shape=tuple(tensor_data.shape), dtype=dtype, device=device)
+                # Get raw bytes from torch tensor
+                raw_tensor = tensor_data.cpu().contiguous()
+                ptr_raw = raw_tensor.data_ptr()
+                byte_size = raw_tensor.numel() * raw_tensor.element_size()
+                data_bytes = (ctypes.c_ubyte * byte_size)()
+                ctypes.memmove(data_bytes, ptr_raw, byte_size)
+                ptr = ctypes.cast(data_bytes, ctypes.c_void_p)
+                t.load(ptr)
+                # Assign to weights struct
+                if layer_idx is None:
+                    # Global weight
+                    setattr(self._weights, field_name, t.lib_tensor())
+                else:
+                    # Array element
+                    arr = getattr(self._weights, field_name)
+                    arr[layer_idx] = t.lib_tensor()
+                # Keep references to avoid GC
+                if not hasattr(self, "_weight_tensors"):
+                    self._weight_tensors = []
+                self._weight_tensors.append(t)
+                if not hasattr(self, "_weight_bytes"):
+                    self._weight_bytes = []
+                self._weight_bytes.append(data_bytes)
 
     def generate(
         self,

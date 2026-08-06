@@ -5,10 +5,12 @@ import torch
 def random_tensor(
     shape, dtype_name, device_name, device_id=0, scale=None, bias=None
 ) -> tuple[torch.Tensor, llaisys.Tensor]:
+    # Always generate reference data on CPU for MXMACA compatibility
+    torch_device_name = "cpu" if device_name == "nvidia" else device_name
     torch_tensor = torch.rand(
         shape,
         dtype=torch_dtype(dtype_name),
-        device=torch_device(device_name, device_id),
+        device=torch_device(torch_device_name, device_id),
     )
     if scale is not None:
         torch_tensor *= scale
@@ -24,23 +26,27 @@ def random_tensor(
 
     api = llaisys.RuntimeAPI(llaisys_device(device_name))
     bytes_ = torch_tensor.numel() * torch_tensor.element_size()
+    # Use appropriate memcpy kind based on device
+    memcpy_kind = llaisys.MemcpyKind.H2D if device_name == "nvidia" else llaisys.MemcpyKind.D2D
     api.memcpy_sync(
         llaisys_tensor.data_ptr(),
         torch_tensor.data_ptr(),
         bytes_,
-        llaisys.MemcpyKind.D2D,
+        memcpy_kind,
     )
 
     return torch_tensor, llaisys_tensor
 
 
 def random_int_tensor(shape, device_name, dtype_name="i64", device_id=0, low=0, high=2):
+    # Always generate reference data on CPU for MXMACA compatibility
+    torch_device_name = "cpu" if device_name == "nvidia" else device_name
     torch_tensor = torch.randint(
         low,
         high,
         shape,
         dtype=torch_dtype(dtype_name),
-        device=torch_device(device_name, device_id),
+        device=torch_device(torch_device_name, device_id),
     )
 
     llaisys_tensor = llaisys.Tensor(
@@ -52,11 +58,13 @@ def random_int_tensor(shape, device_name, dtype_name="i64", device_id=0, low=0, 
 
     api = llaisys.RuntimeAPI(llaisys_device(device_name))
     bytes_ = torch_tensor.numel() * torch_tensor.element_size()
+    # Use appropriate memcpy kind based on device
+    memcpy_kind = llaisys.MemcpyKind.H2D if device_name == "nvidia" else llaisys.MemcpyKind.D2D
     api.memcpy_sync(
         llaisys_tensor.data_ptr(),
         torch_tensor.data_ptr(),
         bytes_,
-        llaisys.MemcpyKind.D2D,
+        memcpy_kind,
     )
 
     return torch_tensor, llaisys_tensor
@@ -65,10 +73,12 @@ def random_int_tensor(shape, device_name, dtype_name="i64", device_id=0, low=0, 
 def zero_tensor(
     shape, dtype_name, device_name, device_id=0
 ) -> tuple[torch.Tensor, llaisys.Tensor]:
+    # Always generate reference data on CPU for MXMACA compatibility
+    torch_device_name = "cpu" if device_name == "nvidia" else device_name
     torch_tensor = torch.zeros(
         shape,
         dtype=torch_dtype(dtype_name),
-        device=torch_device(device_name, device_id),
+        device=torch_device(torch_device_name, device_id),
     )
 
     llaisys_tensor = llaisys.Tensor(
@@ -80,11 +90,13 @@ def zero_tensor(
 
     api = llaisys.RuntimeAPI(llaisys_device(device_name))
     bytes_ = torch_tensor.numel() * torch_tensor.element_size()
+    # Use appropriate memcpy kind based on device
+    memcpy_kind = llaisys.MemcpyKind.H2D if device_name == "nvidia" else llaisys.MemcpyKind.D2D
     api.memcpy_sync(
         llaisys_tensor.data_ptr(),
         torch_tensor.data_ptr(),
         bytes_,
-        llaisys.MemcpyKind.D2D,
+        memcpy_kind,
     )
 
     return torch_tensor, llaisys_tensor
@@ -93,7 +105,9 @@ def zero_tensor(
 def arrange_tensor(
     start, end, device_name, device_id=0
 ) -> tuple[torch.Tensor, llaisys.Tensor]:
-    torch_tensor = torch.arange(start, end, device=torch_device(device_name, device_id))
+    # Always generate reference data on CPU for MXMACA compatibility
+    torch_device_name = "cpu" if device_name == "nvidia" else device_name
+    torch_tensor = torch.arange(start, end, device=torch_device(torch_device_name, device_id))
     llaisys_tensor = llaisys.Tensor(
         (end - start,),
         dtype=llaisys_dtype("i64"),
@@ -103,11 +117,13 @@ def arrange_tensor(
 
     api = llaisys.RuntimeAPI(llaisys_device(device_name))
     bytes_ = torch_tensor.numel() * torch_tensor.element_size()
+    # Use appropriate memcpy kind based on device
+    memcpy_kind = llaisys.MemcpyKind.H2D if device_name == "nvidia" else llaisys.MemcpyKind.D2D
     api.memcpy_sync(
         llaisys_tensor.data_ptr(),
         torch_tensor.data_ptr(),
         bytes_,
-        llaisys.MemcpyKind.D2D,
+        memcpy_kind,
     )
 
     return torch_tensor, llaisys_tensor
@@ -132,20 +148,23 @@ def check_equal(
         else:  # TODO: Support negative strides in the future
             raise ValueError("Negative strides are not supported yet")
 
+    # Always use CPU for result tensor for MXMACA compatibility
+    device_name_str = device_name(llaisys_result.device_type())
+    torch_device_name = "cpu" if device_name_str == "nvidia" else device_name_str
     tmp = torch.zeros(
         (right + 1,),
         dtype=torch_answer.dtype,
-        device=torch_device(
-            device_name(llaisys_result.device_type()), llaisys_result.device_id()
-        ),
+        device=torch_device(torch_device_name, llaisys_result.device_id()),
     )
     result = torch.as_strided(tmp, shape, strides)
     api = llaisys.RuntimeAPI(llaisys_result.device_type())
+    # Use appropriate memcpy kind based on device
+    memcpy_kind = llaisys.MemcpyKind.D2H if device_name_str == "nvidia" else llaisys.MemcpyKind.D2D
     api.memcpy_sync(
         result.data_ptr(),
         llaisys_result.data_ptr(),
         (right + 1) * tmp.element_size(),
-        llaisys.MemcpyKind.D2D,
+        memcpy_kind,
     )
 
     if strict:
