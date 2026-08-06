@@ -8,6 +8,9 @@
 #include "op.hpp"
 #include "../../core/llaisys_core.hpp"
 #include "../../utils.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/linear_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -94,7 +97,9 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
     switch (out->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
+        nvidia::linear(out->data(), in->data(), weight->data(),
+                       has_bias ? bias->data() : nullptr, out->dtype(), M, N, K,
+                       llaisys::core::context().runtime().stream());
         return;
 #endif
     default:

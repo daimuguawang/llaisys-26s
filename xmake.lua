@@ -89,8 +89,23 @@ target("llaisys-ops")
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
     end
-    
+
     add_files("src/ops/*/*.cpp")
+
+    on_install(function (target) end)
+target_end()
+
+target("llaisys-models")
+    set_kind("static")
+    add_deps("llaisys-ops")
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    if not is_plat("windows") then
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
+    end
+
+    add_files("src/models/*/*.cpp")
 
     on_install(function (target) end)
 target_end()
@@ -102,13 +117,29 @@ target("llaisys")
     add_deps("llaisys-core")
     add_deps("llaisys-tensor")
     add_deps("llaisys-ops")
+    add_deps("llaisys-models")
 
     set_languages("cxx17")
     set_warnings("all", "error")
+
     add_files("src/llaisys/*.cc")
+
+    if has_config("nv-gpu") then
+        local cuda_home = os.getenv("CUDA_HOME") or "/usr/local/cuda"
+        -- Compile CUDA .cu files directly in the shared library so xmake
+        -- performs the device-link step (resolves __cudaRegisterLinkedBinary_*).
+        add_files("src/device/nvidia/*.cu", "src/ops/*/nvidia/*.cu")
+        add_includedirs("src", "include")
+        add_includedirs(cuda_home .. "/include")
+        add_cugencodes("sm_120")
+        add_cuflags("--expt-relaxed-constexpr", "-O3", "-Xcompiler -fPIC", {force = true})
+        add_links("cudart", "cublas", "cublasLt")
+        add_linkdirs(cuda_home .. "/lib64")
+        add_rpathdirs(cuda_home .. "/lib64")
+    end
+
     set_installdir(".")
 
-    
     after_install(function (target)
         -- copy shared library to python package
         print("Copying llaisys to python/llaisys/libllaisys/ ..")

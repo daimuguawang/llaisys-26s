@@ -10,6 +10,9 @@
 #include "../../utils.hpp"
 #include <cstdint>
 #include <cstring>
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/embedding_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -70,7 +73,8 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
     switch (out->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
+        nvidia::embedding(out->data(), reinterpret_cast<const int64_t *>(index->data()),
+                          weight->data(), out->dtype(), num_indices, embedding_dim);
         return;
 #endif
     default:

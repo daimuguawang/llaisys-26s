@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "../../ops/add/op.hpp"
 #include "../../ops/embedding/op.hpp"
 #include "../../ops/rms_norm/op.hpp"
 #include "../../ops/linear/op.hpp"
@@ -9,6 +10,31 @@
 #include <cmath>
 #include <cstring>
 namespace llaisys::models {
+
+// Device-aware copy between two tensors residing on the same device.
+static void copyTensor(tensor_t dst, tensor_t src) {
+    size_t bytes = src->numel() * src->elementSize();
+    if (dst->deviceType() == LLAISYS_DEVICE_CPU) {
+        std::memcpy(dst->data(), src->data(), bytes);
+    } else {
+        llaisys::core::context().setDevice(dst->deviceType(), dst->deviceId());
+        auto api = llaisys::core::context().runtime().api();
+        api->memcpy_sync(dst->data(), src->data(), bytes, LLAISYS_MEMCPY_D2D);
+    }
+}
+
+// Copy tensor data back to a host pointer.
+static void copyToHost(void *host_dst, tensor_t src) {
+    size_t bytes = src->numel() * src->elementSize();
+    if (src->deviceType() == LLAISYS_DEVICE_CPU) {
+        std::memcpy(host_dst, src->data(), bytes);
+    } else {
+        llaisys::core::context().setDevice(src->deviceType(), src->deviceId());
+        auto api = llaisys::core::context().runtime().api();
+        api->memcpy_sync(host_dst, src->data(), bytes, LLAISYS_MEMCPY_D2H);
+        api->device_synchronize();
+    }
+}
 Qwen2Model::Qwen2Model(const LlaisysQwen2Meta *meta_, llaisysDeviceType_t device, int dev_id)
     : device_type(device), device_id(dev_id) {
     std::memcpy(&meta, meta_, sizeof(LlaisysQwen2Meta));
@@ -98,54 +124,23 @@ void Qwen2Model::forwardLayer(size_t layer_idx, size_t seq_len, size_t past_len)
     ops::rope(k_rope, k_buf, pos_ids, meta.theta);
     // Update KV cache
     auto k_dst = k_cache[layer_idx]->slice(0, past_len, total_len);
-    std::memcpy(k_dst->data(), k_rope->data(), k_rope->numel() * k_rope->elementSize());
+    copyTensor(k_dst, k_rope);
     auto v_dst = v_cache[layer_idx]->slice(0, past_len, total_len);
-    std::memcpy(v_dst->data(), v_buf->data(), v_buf->numel() * v_buf->elementSize());
+    copyTensor(v_dst, v_buf);
     float scale = 1.0f / sqrtf(static_cast<float>(meta.dh));
     auto k_full = k_cache[layer_idx]->slice(0, 0, total_len);
     auto v_full = v_cache[layer_idx]->slice(0, 0, total_len);
     ops::self_attention(attn_out, q_rope, k_full, v_full, scale);
     auto attn_out_2d = attn_out->view({seq_len, meta.nh * meta.dh});
     ops::linear(o_buf, attn_out_2d, o_w, nullptr);
-    // Residual add
-    auto add_inplace = [&](tensor_t dst, tensor_t src) {
-        size_t n = dst->numel();
-        switch (dst->dtype()) {
-        case LLAISYS_DTYPE_F32: {
-            float *d = reinterpret_cast<float *>(dst->data());
-            const float *s = reinterpret_cast<const float *>(src->data());
-            for (size_t i = 0; i < n; i++) d[i] += s[i];
-            break;
-        }
-        case LLAISYS_DTYPE_BF16: {
-            auto *d = reinterpret_cast<bf16_t *>(dst->data());
-            const auto *s = reinterpret_cast<const bf16_t *>(src->data());
-            for (size_t i = 0; i < n; i++) {
-                float dv = utils::cast<float>(d[i]) + utils::cast<float>(s[i]);
-                d[i] = utils::cast<bf16_t>(dv);
-            }
-            break;
-        }
-        case LLAISYS_DTYPE_F16: {
-            auto *d = reinterpret_cast<fp16_t *>(dst->data());
-            const auto *s = reinterpret_cast<const fp16_t *>(src->data());
-            for (size_t i = 0; i < n; i++) {
-                float dv = utils::cast<float>(d[i]) + utils::cast<float>(s[i]);
-                d[i] = utils::cast<fp16_t>(dv);
-            }
-            break;
-        }
-        default:
-            EXCEPTION_UNSUPPORTED_DATATYPE(dst->dtype());
-        }
-    };
-    add_inplace(hidden, o_buf);
+    // Residual add (in-place element-wise add works for both CPU and CUDA dispatch)
+    ops::add(hidden, hidden, o_buf);
     ops::rms_norm(mlp_norm_out, hidden, m_norm_w, meta.epsilon);
     ops::linear(gate_buf, mlp_norm_out, gate_w, nullptr);
     ops::linear(up_buf, mlp_norm_out, up_w, nullptr);
     ops::swiglu(swiglu_out, gate_buf, up_buf);
     ops::linear(down_buf, swiglu_out, down_w, nullptr);
-    add_inplace(hidden, down_buf);
+    ops::add(hidden, hidden, down_buf);
 }
 int64_t Qwen2Model::infer(int64_t *token_ids, size_t ntoken) {
     // Sync global weights from weights_struct (populated by Python via getWeights()).
@@ -167,7 +162,7 @@ int64_t Qwen2Model::infer(int64_t *token_ids, size_t ntoken) {
         tensor_t token_tensor = Tensor::create({1}, LLAISYS_DTYPE_I64, device_type, device_id);
         token_tensor->load(&tid);
         ops::embedding(embed_out, token_tensor, in_emb);
-        std::memcpy(hidden->data(), embed_out->data(), embed_out->numel() * embed_out->elementSize());
+        copyTensor(hidden, embed_out);
         for (size_t i = 0; i < meta.nlayer; i++) {
             forwardLayer(i, 1, past_len);
         }
@@ -178,7 +173,7 @@ int64_t Qwen2Model::infer(int64_t *token_ids, size_t ntoken) {
     ops::linear(logits, attn_norm_out, lm_head, nullptr);
     ops::argmax(max_idx, max_val, logits);
     int64_t result;
-    std::memcpy(&result, max_idx->data(), sizeof(int64_t));
+    copyToHost(&result, max_idx);
     return result;
 }
 } // namespace llaisys::models

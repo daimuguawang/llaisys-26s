@@ -10,6 +10,9 @@
 #include "../../utils.hpp"
 #include <cstdint>
 #include <cfloat>
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/argmax_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -64,7 +67,8 @@ void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals) {
     switch (vals->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
+        nvidia::argmax(reinterpret_cast<int64_t *>(max_idx->data()), max_val->data(),
+                       vals->data(), vals->dtype(), vals->numel());
         return;
 #endif
     default:

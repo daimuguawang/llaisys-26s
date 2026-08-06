@@ -10,6 +10,9 @@
 #include "../../utils.hpp"
 #include <cmath>
 #include <cstdint>
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/rope_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -92,7 +95,9 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
     switch (out->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
+        nvidia::rope(out->data(), in->data(),
+                     reinterpret_cast<const int64_t *>(pos_ids->data()),
+                     out->dtype(), theta, seq_len, n_heads, head_dim);
         return;
 #endif
     default:

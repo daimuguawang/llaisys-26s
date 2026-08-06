@@ -12,6 +12,9 @@
 #include <vector>
 #include <algorithm>
 #include <cfloat>
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/self_attention_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 
@@ -134,7 +137,8 @@ void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float
     switch (attn_val->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
+        nvidia::self_attention(attn_val->data(), q->data(), k->data(), v->data(),
+                               attn_val->dtype(), scale, qlen, kvlen, n_heads, n_kv_heads, head_dim);
         return;
 #endif
     default:
